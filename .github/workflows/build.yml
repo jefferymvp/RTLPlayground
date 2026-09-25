@@ -1,12 +1,29 @@
-name: Build firmware
+name: Build and Release Firmware
 
 on:
   push:
     branches: ['**']
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: '是否直接发布为 GitHub Release'
+        required: false
+        type: boolean
+        default: true
+      release_tag:
+        description: 'Release 版本号（如 v0.1.0-argon）'
+        required: false
+        type: string
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
 
 jobs:
   build:
+    name: Build FG_4GT_2SX_V2_0 Firmware
     runs-on: ubuntu-latest
     container:
       image: debian:trixie
@@ -18,13 +35,51 @@ jobs:
         run: |
           apt update
           apt install make gcc sdcc xxd python-is-python3 libjson-c-dev zlib1g-dev -y
+
       - name: Run the host-side unit tests
         run: make -C test
+
       - name: Check if machine.c can be compiled for all machines
         run: make machine_check
-      - name: Make project (4x2/RTL8372)
-        run: make CI=1 MACHINE="KP_9000_6XHML_X2"
-      - name: Make project (8x1/RTL8373)
-        run: make CI=1 MACHINE="KP_9000_9XHML_X_V3_1"
-      - name: Make project with the health instrumentation
-        run: make clean && make CI=1 MACHINE="KP_9000_6XHML_X2" HEALTH=1
+
+      - name: Build Firmware (FG_4GT_2SX_V2_0)
+        run: |
+          # 1. 编译基础固件
+          make MACHINE="FG_4GT_2SX_V2_0"
+          # 2. 编译原厂 OEM Web 固件升级包
+          make -C installer
+
+      - name: Organize Firmware Assets
+        run: |
+          mkdir -p release_assets
+          # 兼容不同版本 Makefile 的输出路径
+          if ls output/FG_4GT_2SX_V2_0/*.bin 1> /dev/null 2>&1; then
+            cp output/FG_4GT_2SX_V2_0/*.bin release_assets/rtlplayground_FG_4GT_2SX_V2_0.bin
+          elif [ -f output/rtlplayground.bin ]; then
+            cp output/rtlplayground.bin release_assets/rtlplayground_FG_4GT_2SX_V2_0.bin
+          fi
+          # 复制 OEM 原厂固件升级包
+          if [ -f installer/output/rtlplayground_oem_upgrade.bin ]; then
+            cp installer/output/rtlplayground_oem_upgrade.bin release_assets/rtlplayground_oem_upgrade_FG_4GT_2SX_V2_0.bin
+          fi
+          echo "=== 待发布的固件列表 ==="
+          ls -lh release_assets/
+
+      - name: Upload Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTLPlayground_FG_4GT_2SX_V2_0_Firmware
+          path: release_assets/*
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}
+          name: "RTLPlayground - ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}"
+          body: RTLPlayground firmware
+          files: release_assets/*
+          generate_release_notes: false
+          draft: false
+          prerelease: false
